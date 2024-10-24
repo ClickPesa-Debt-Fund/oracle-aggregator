@@ -1,10 +1,9 @@
 use crate::{
-    errors::OracleAggregatorErrors, price_data::normalize_price, storage, types::OracleConfig,
+    errors::OracleAggregatorErrors,
+    storage::{self},
 };
 use sep_40_oracle::{Asset, PriceData, PriceFeedClient, PriceFeedTrait};
-use soroban_sdk::{
-    contract, contractimpl, panic_with_error, unwrap::UnwrapOptimized, Address, Env, Vec,
-};
+use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env, Symbol, Vec};
 
 #[contract]
 pub struct OracleAggregator;
@@ -36,22 +35,18 @@ impl PriceFeedTrait for OracleAggregator {
     }
 
     fn lastprice(e: Env, asset: Asset) -> Option<PriceData> {
-        if !storage::has_asset_config(&e, &asset) {
-            panic_with_error!(&e, OracleAggregatorErrors::AssetNotFound);
-        }
-        if storage::get_blocked_status(&e, &asset) {
-            panic_with_error!(&e, OracleAggregatorErrors::AssetBlocked);
-        }
+        storage::extend_instance(&e);
 
-        let config = storage::get_asset_config(&e, &asset);
-        let oracle = PriceFeedClient::new(&e, &config.oracle_id);
-        let price: Option<PriceData> = oracle.lastprice(&config.asset);
-        if let Some(price) = price {
-            let decimals = storage::get_decimals(&e);
-            let normalized_price = normalize_price(price.clone(), &decimals, &config.decimals);
-            return Some(normalized_price);
-        } else {
-            return None;
+        let usdc = storage::get_usdc(&e);
+        let cpyt = storage::get_cpyt(&e);
+        match asset {
+            Asset::Stellar(ref a) if a.clone() == usdc || a.clone() == cpyt => {
+                let oracle = PriceFeedClient::new(&e, &storage::get_oracle(&e));
+                oracle.lastprice(&Asset::Other(Symbol::new(&e, "USDC")))
+            }
+            _ => {
+                panic_with_error!(&e, OracleAggregatorErrors::AssetNotFound);
+            }
         }
     }
 }
@@ -70,84 +65,22 @@ impl OracleAggregator {
     /// * `AlreadyInitialized` - The contract has already been initialized
     /// * `InvalidAssets` - The asset array is invalid
     /// * `InvalidOracleConfig` - The oracle config array is invalid
-    pub fn initialize(
-        e: Env,
-        admin: Address,
-        base: Asset,
-        assets: Vec<Asset>,
-        asset_configs: Vec<OracleConfig>,
-        decimals: u32,
-    ) {
+    pub fn initialize(e: Env, usdc: Address, cpyt: Address, usdc_oracle: Address) {
         if storage::get_is_init(&e) {
             panic_with_error!(&e, OracleAggregatorErrors::AlreadyInitialized);
         }
 
-        let assets_count = assets.len();
-        if assets_count <= 0 {
-            panic_with_error!(&e, OracleAggregatorErrors::InvalidAssets);
-        }
-
-        if assets_count != asset_configs.len() {
-            panic_with_error!(&e, OracleAggregatorErrors::InvalidOracleConfig);
-        }
-
-        for index in 0..assets_count {
-            let asset = assets.get(index).unwrap_optimized();
-            let config = asset_configs.get(index).unwrap_optimized();
-            if storage::has_asset_config(&e, &asset) {
-                panic_with_error!(&e, OracleAggregatorErrors::InvalidAssets);
-            }
-            storage::set_asset_config(&e, &asset, &config);
-        }
-
         storage::extend_instance(&e);
         storage::set_is_init(&e);
-        storage::set_admin(&e, &admin);
+        storage::set_usdc(&e, &usdc);
+        storage::set_cpyt(&e, &cpyt);
+        storage::set_oracle(&e, &usdc_oracle);
+
+        let usdc_oracle = PriceFeedClient::new(&e, &usdc_oracle);
+        let base = usdc_oracle.base();
+        let decimals = usdc_oracle.decimals();
+
         storage::set_base(&e, &base);
         storage::set_decimals(&e, &decimals);
-        storage::set_assets(&e, &assets);
-    }
-
-    /// Fetch the confugration of an asset
-    pub fn config(e: Env, asset: Asset) -> OracleConfig {
-        if storage::has_asset_config(&e, &asset) {
-            return storage::get_asset_config(&e, &asset);
-        } else {
-            panic_with_error!(&e, OracleAggregatorErrors::AssetNotFound);
-        }
-    }
-
-    /// (Admin only) Block an asset
-    ///
-    /// ### Arguments
-    /// * `asset` - The asset to block
-    ///
-    /// ### Errors
-    /// * `AssetNotFound` - The asset is not found
-    pub fn block(e: Env, asset: Asset) {
-        let admin = storage::get_admin(&e);
-        admin.require_auth();
-
-        if !storage::has_asset_config(&e, &asset) {
-            panic_with_error!(&e, OracleAggregatorErrors::AssetNotFound);
-        }
-        storage::set_blocked_status(&e, &asset, &true);
-    }
-
-    /// (Admin only) Unblock an asset
-    ///
-    /// ### Arguments
-    /// * `asset` - The asset to unblock
-    ///
-    /// ### Errors
-    /// * `AssetNotFound` - The asset is not found
-    pub fn unblock(e: Env, asset: Asset) {
-        let admin = storage::get_admin(&e);
-        admin.require_auth();
-
-        if !storage::has_asset_config(&e, &asset) {
-            panic_with_error!(&e, OracleAggregatorErrors::AssetNotFound);
-        }
-        storage::set_blocked_status(&e, &asset, &false);
     }
 }
